@@ -12,6 +12,25 @@
 #endif
 #include "3rdparty/sqlite3/sqlite3.h"
 #include "inl/ccv_convnet_inl.h"
+#include "binary_format.h"
+#include "buffer.h"
+
+static SBinaryTag* convnode_to_tag(ccv_convnet_layer_t* layer);
+static SBinaryTag* single_convnode_to_tag(ccv_convnet_layer_t* layer, int currentPartition, int partitionCount);
+static SBinaryTag* fcnode_to_tag(ccv_convnet_layer_t* layer);
+static SBinaryTag* relunode_to_tag(ccv_convnet_layer_t* layer);
+static SBinaryTag* poolnode_to_tag(ccv_convnet_layer_t* layer);
+static SBinaryTag* normnode_to_tag(ccv_convnet_layer_t* layer);
+static SBinaryTag* softmaxnode_to_tag(ccv_convnet_layer_t* layer);
+
+#undef HAVE_SSE2
+#undef USE_DISPATCH
+
+#define SAVE_RESULTS
+#if defined(SAVE_RESULTS)
+#define FN_LEN (1024)
+#define DUMP_FILE_PATH ("/Users/petewarden/projects/jpcnn/data/libccv_blobs/")
+#endif // SAVE_RESULTS
 
 #ifndef CASE_TESTS
 
@@ -155,6 +174,8 @@ static void _ccv_convnet_convolutional_forward_propagate(ccv_convnet_layer_t* la
 	int count_per_partition = count / partition;
 	int ch_per_partition = ch / partition;
 	assert(count_per_partition % 4 == 0);
+int index = 0;
+
 #ifdef HAVE_SSE2
 	_ccv_convnet_layer_simd_alloc_reserved(layer);
 #endif
@@ -264,6 +285,14 @@ static void _ccv_convnet_convolutional_forward_propagate(ccv_convnet_layer_t* la
 					}
 					w += kernel_cols * ch_per_partition * 4;
 #else
+if ((index < 1) && (p == 1)) {
+  fprintf(stderr, "layer_w = ");
+  print_float_array(layer_w, 10);
+  fprintf(stderr, ", apz = ");
+  print_float_array(apz, 10);
+  fprintf(stderr, "\n");
+  index += 1;
+}
 					for (x = 0; x < maxx; x++)
 						for (c = 0; c < ch_per_partition; c++)
 							v += w[x * ch_per_partition + c] * apz[x * ch + c];
@@ -363,8 +392,9 @@ static void _ccv_convnet_rnorm_forward_propagate(ccv_convnet_layer_t* layer, ccv
 					{
 						float v = ap[j * ch + p * ch_per_partition + k];
 						float denom = 0;
-						for (x = ccv_max(k - way, 0); x <= ccv_min(k + way, ch_per_partition - 1); x++)
+						for (x = ccv_max(k - way, 0); x <= ccv_min(k + way, ch_per_partition - 1); x++) {
 							denom += ap[j * ch + p * ch_per_partition + x] * ap[j * ch + p * ch_per_partition + x];
+            }
 						denom = kappa + alpha * denom;
 						bp[j * ch + p * ch_per_partition + k] = v * powf(denom, -beta);
 					}
@@ -609,6 +639,7 @@ void ccv_convnet_classify(ccv_convnet_t* convnet, ccv_dense_matrix_t** a, int sy
 	assert(scan >= 0 && scan < convnet->count);
 	assert(full_connect >= 0 && full_connect < convnet->count);
 	memset(b, 0, sizeof(ccv_dense_matrix_t*) * (convnet->count + 1));
+  const int sampleCount = 1;
 	for (i = 0; i < batch; i++)
 	{
 		assert(CCV_GET_CHANNEL(a[i]->type) == convnet->channels);
@@ -629,28 +660,47 @@ void ccv_convnet_classify(ccv_convnet_t* convnet, ccv_dense_matrix_t** a, int sy
 		ccv_matrix_free(slice);
 		// doing the first few layers until the first scan layer
 		int out_rows, out_cols, out_partition;
-		ccv_dense_matrix_t* c = ccv_dense_matrix_new(5 * (!!symmetric + 1), convnet->layers[full_connect].input.node.count, CCV_32F | CCV_C1, 0, 0);
+		ccv_dense_matrix_t* c = ccv_dense_matrix_new(sampleCount * (!!symmetric + 1), convnet->layers[full_connect].input.node.count, CCV_32F | CCV_C1, 0, 0);
 		for (t = 0; t <= !!symmetric; t++)
 		{
 			rows = b[0]->rows, cols = b[0]->cols;
+      fprintf(stderr, "b[0]->rows = %d, b[0]->cols = %d, channels = %d\n", b[0]->rows, b[0]->cols, CCV_GET_CHANNEL(b[0]->type));
 			for (j = 0; j < scan + 1; j++)
 			{
 				ccv_convnet_layer_t* layer = convnet->layers + j;
 				_ccv_convnet_layer_derive_output(layer, rows, cols, &out_rows, &out_cols, &out_partition);
+#ifdef SAVE_RESULTS
+        char input_filename[FN_LEN];
+        snprintf(input_filename, FN_LEN,
+          "%s%03d_input.blob",
+          DUMP_FILE_PATH, j);
+        ccv_dense_matrix_t* buffer = b[j];
+        float* buffer_data = buffer->data.f32;
+        int buffer_dims[4] = {
+          1,
+          buffer->rows,
+          buffer->cols,
+          CCV_GET_CHANNEL(buffer->type),
+        };
+        int buffer_dims_length = 4;
+        buffer_dump_to_file(buffer_data, buffer_dims, buffer_dims_length, 32, input_filename);
+#endif // SAVE_RESULTS
 				_ccv_convnet_layer_forward_propagate(layer, b[j], b + j + 1, 0);
 				assert(b[j + 1]->rows == out_rows && b[j + 1]->cols == out_cols);
 				if (j > 0)
 					ccv_matrix_free(b[j]);
 				rows = out_rows, cols = out_cols;
 			}
-			int offsets[5][2] = {
-				{0, 0},
-				{cols - convnet->layers[scan + 1].input.matrix.cols, 0},
+      fprintf(stderr, "cols = %d, layer.cols = %d, rows = %d, layer.rows = %d\n",
+        cols, convnet->layers[scan + 1].input.matrix.cols, rows, convnet->layers[scan + 1].input.matrix.rows);
+			int offsets[sampleCount][2] = {
+//				{0, 0},
+//				{cols - convnet->layers[scan + 1].input.matrix.cols, 0},
 				{(cols - convnet->layers[scan + 1].input.matrix.cols) / 2, (rows - convnet->layers[scan + 1].input.matrix.rows) / 2},
-				{0, rows - convnet->layers[scan + 1].input.matrix.rows},
-				{cols - convnet->layers[scan + 1].input.matrix.cols, rows - convnet->layers[scan + 1].input.matrix.rows},
+//				{0, rows - convnet->layers[scan + 1].input.matrix.rows},
+//				{cols - convnet->layers[scan + 1].input.matrix.cols, rows - convnet->layers[scan + 1].input.matrix.rows},
 			};
-			for (k = 0; k < 5; k++)
+			for (k = 0; k < sampleCount; k++)
 			{
 				ccv_dense_matrix_t* input = 0;
 				ccv_convnet_layer_t* layer = convnet->layers + scan + 1;
@@ -660,6 +710,22 @@ void ccv_convnet_classify(ccv_convnet_t* convnet, ccv_dense_matrix_t** a, int sy
 				for (j = scan + 1; j < full_connect; j++)
 				{
 					layer = convnet->layers + j;
+#ifdef SAVE_RESULTS
+          char input_filename[FN_LEN];
+          snprintf(input_filename, FN_LEN,
+            "%s%03d_input.blob",
+            DUMP_FILE_PATH, j);
+          ccv_dense_matrix_t* buffer = j > scan + 1 ? b[j] : input;
+          float* buffer_data = buffer->data.f32;
+          int buffer_dims[4] = {
+            1,
+            buffer->rows,
+            buffer->cols,
+            CCV_GET_CHANNEL(buffer->type),
+          };
+          int buffer_dims_length = 4;
+          buffer_dump_to_file(buffer_data, buffer_dims, buffer_dims_length, 32, input_filename);
+#endif // SAVE_RESULTS
 					_ccv_convnet_layer_forward_propagate(layer, j > scan + 1 ? b[j] : input, b + j + 1, 0);
 					if (j > scan + 1)
 						ccv_matrix_free(b[j]);
@@ -681,6 +747,22 @@ void ccv_convnet_classify(ccv_convnet_t* convnet, ccv_dense_matrix_t** a, int sy
 		{
 			ccv_convnet_layer_t* layer = convnet->layers + j;
 			assert(layer->type == CCV_CONVNET_FULL_CONNECT);
+#ifdef SAVE_RESULTS
+      char input_filename[FN_LEN];
+      snprintf(input_filename, FN_LEN,
+        "%s%03d_input.blob",
+        DUMP_FILE_PATH, j);
+      ccv_dense_matrix_t* buffer = b[j];
+      float* buffer_data = buffer->data.f32;
+      int buffer_dims[4] = {
+        1,
+        buffer->rows,
+        buffer->cols,
+        CCV_GET_CHANNEL(buffer->type),
+      };
+      int buffer_dims_length = 4;
+      buffer_dump_to_file(buffer_data, buffer_dims, buffer_dims_length, 32, input_filename);
+#endif // SAVE_RESULTS
 			_ccv_convnet_full_connect_forward_propagate_parallel(layer, b[j], b + j + 1);
 			ccv_matrix_free(b[j]);
 		}
@@ -1542,6 +1624,283 @@ ccv_convnet_t* ccv_convnet_read(int use_cwc_accel, const char* filename)
 	return 0;
 }
 
+void ccv_convnet_write_binary(ccv_convnet_t* convnet, const char* filename, const char* label_filename, ccv_convnet_write_param_t params)
+{
+  SBinaryTag* graphDict = create_dict_tag();
+
+  float* meanData = convnet->mean_activity->data.f32;
+  int meanDims[3] = {
+    convnet->input.height,
+    convnet->input.width,
+    convnet->channels,
+  };
+  SBinaryTag* dataMeanTag = buffer_to_tag_dict(meanData, meanDims, 3, 32, 32);
+  graphDict = add_tag_to_dict(graphDict, "data_mean", dataMeanTag);
+  free(dataMeanTag);
+
+  assert(convnet->input.width == convnet->input.height);
+  add_uint_to_dict(graphDict, "input_size", convnet->input.width);
+
+  add_string_to_dict(graphDict, "source", "libccv");
+
+  SBinaryTag* layersTag = create_list_tag();
+
+  int i;
+  for (i = 0; i < convnet->count; i++) {
+    ccv_convnet_layer_t* layer = convnet->layers + i;
+    SBinaryTag* currentLayerTag;
+    switch (layer->type) {
+      case CCV_CONVNET_CONVOLUTIONAL:
+        currentLayerTag = convnode_to_tag(layer);
+        layersTag = add_tag_to_list(layersTag, currentLayerTag);
+        free(currentLayerTag);
+        currentLayerTag = relunode_to_tag(layer);
+        break;
+      case CCV_CONVNET_FULL_CONNECT:
+        currentLayerTag = fcnode_to_tag(layer);
+        if (layer->net.full_connect.relu) {
+          layersTag = add_tag_to_list(layersTag, currentLayerTag);
+          free(currentLayerTag);
+          currentLayerTag = relunode_to_tag(layer);
+        }
+        break;
+      case CCV_CONVNET_MAX_POOL:
+      case CCV_CONVNET_AVERAGE_POOL:
+        currentLayerTag = poolnode_to_tag(layer);
+        break;
+      case CCV_CONVNET_LOCAL_RESPONSE_NORM:
+        currentLayerTag = normnode_to_tag(layer);
+        break;
+    }
+    layersTag = add_tag_to_list(layersTag, currentLayerTag);
+    free(currentLayerTag);
+  }
+
+  layersTag = add_tag_to_list(layersTag, softmaxnode_to_tag(NULL));
+
+  graphDict = add_tag_to_dict(graphDict, "layers", layersTag);
+  free(layersTag);
+
+  SBinaryTag* labelNamesTag = create_list_tag();
+
+  FILE* labelFile = fopen(label_filename, "rb");
+  const int maxLabelLength = 1024;
+  char labelLineBuffer[maxLabelLength];
+  while (fgets(labelLineBuffer, maxLabelLength, labelFile) != NULL) {
+    labelLineBuffer[strcspn(labelLineBuffer, "\n")] = '\0';
+    if (labelLineBuffer[0] == '\0') {
+      continue;
+    }
+    // Chop off anything after the first comma
+    labelLineBuffer[strcspn(labelLineBuffer, ",")] = '\0';
+    labelNamesTag = add_string_to_list(labelNamesTag, labelLineBuffer);
+  }
+  graphDict = add_tag_to_dict(graphDict, "label_names", labelNamesTag);
+  free(labelNamesTag);
+
+  SBinaryTag* copyrightTag = create_string_tag("Creative Commons licensed from libccv");
+  graphDict = add_tag_to_dict(graphDict, "copyright", copyrightTag);
+  free(copyrightTag);
+
+  FILE* outputFile = fopen(filename, "wb");
+  assert(outputFile != NULL);
+  fwrite(graphDict, (graphDict->length + 8), 1, outputFile);
+  fclose(outputFile);
+  free(graphDict);
+
+}
+
+SBinaryTag* convnode_to_tag(ccv_convnet_layer_t* layer) {
+  const int partitionCount = layer->input.matrix.partition;
+  if (partitionCount == 1) {
+    return single_convnode_to_tag(layer, 0, 1);
+  }
+  SBinaryTag* resultDict = create_dict_tag();
+  resultDict = add_string_to_dict(resultDict, "class", "gconv");
+  resultDict = add_string_to_dict(resultDict, "name", "nameless libccv gconv layer");
+
+  SBinaryTag* layersTag = create_list_tag();
+  for (int index = 0; index < partitionCount; index += 1) {
+    SBinaryTag* layerTag = single_convnode_to_tag(layer, index, partitionCount);
+    layersTag = add_tag_to_list(layersTag, layerTag);
+    free(layerTag);
+  }
+  resultDict = add_tag_to_dict(resultDict, "layers", layersTag);
+  free(layersTag);
+
+  resultDict = add_uint_to_dict(resultDict, "layers_count", partitionCount);
+  resultDict = add_uint_to_dict(resultDict, "kernels_count", layer->net.convolutional.count);
+
+  return resultDict;
+}
+
+SBinaryTag* single_convnode_to_tag(ccv_convnet_layer_t* layer, int currentPartition, int partitionCount) {
+  SBinaryTag* resultDict = create_dict_tag();
+  resultDict = add_string_to_dict(resultDict, "class", "conv");
+  resultDict = add_string_to_dict(resultDict, "name", "nameless libccv conv layer");
+
+  SBinaryTag* specDict = create_dict_tag();
+  const int kernelsPerPartition = (layer->net.convolutional.count / partitionCount);
+  specDict = add_uint_to_dict(specDict, "num_kernels", kernelsPerPartition);
+  assert(layer->net.convolutional.rows == layer->net.convolutional.cols);
+  const int kernelSize = layer->net.convolutional.rows;
+  specDict = add_uint_to_dict(specDict, "ksize", kernelSize);
+  specDict = add_uint_to_dict(specDict, "stride", layer->net.convolutional.strides);
+  resultDict = add_tag_to_dict(resultDict, "spec", specDict);
+  free(specDict);
+
+  const bool wantTransposedOutput = true;
+  const bool areKernelsTransposed = true;
+  const bool useBias = true;
+  const int outputBitDepth = 16;
+  const int totalChannels = layer->net.convolutional.channels;
+  const int channelsPerPartition = (totalChannels / partitionCount);
+  const int elementsPerPartition = (kernelsPerPartition * kernelSize * kernelSize * channelsPerPartition);
+
+  float* kernelsData = (layer->w + (currentPartition * elementsPerPartition));
+  const int kernelsElementCount = (layer->wnum / partitionCount);
+  assert(elementsPerPartition == kernelsElementCount);
+  int kernelsDims[2] = {
+    (layer->net.convolutional.count / partitionCount),
+    (layer->net.convolutional.cols * layer->net.convolutional.rows * (layer->input.matrix.channels / partitionCount)),
+  };
+  fprintf(stderr, "kernelsDims = (%d, %d), kernelsElementCount = %d\n", kernelsDims[0], kernelsDims[1], kernelsElementCount);
+  int kernelsDimsLength = 2;
+  assert(element_count_from_dims(kernelsDims, kernelsDimsLength) == kernelsElementCount);
+
+  if (wantTransposedOutput != areKernelsTransposed) {
+    transpose_buffer(kernelsData, kernelsDims, kernelsDimsLength);
+  }
+
+  SBinaryTag* kernelsTag = buffer_to_tag_dict(kernelsData, kernelsDims, kernelsDimsLength, 32, outputBitDepth);
+  resultDict = add_tag_to_dict(resultDict, "kernels", kernelsTag);
+  free(kernelsTag);
+  if (wantTransposedOutput != areKernelsTransposed) {
+    transpose_buffer(kernelsData, kernelsDims, kernelsDimsLength); // Undo the original transpose by applying another
+  }
+
+  if (wantTransposedOutput) {
+    resultDict = add_uint_to_dict(resultDict, "are_kernels_transposed", 1);
+  } else {
+    resultDict = add_uint_to_dict(resultDict, "are_kernels_transposed", 0);
+  }
+
+  resultDict = add_uint_to_dict(resultDict, "has_bias", useBias);
+  if (useBias) {
+    float* biasData = layer->bias;
+    int biasDims[1] = { (layer->net.convolutional.count / partitionCount) };
+    int biasDimsLength = 1;
+    SBinaryTag* biasTag = buffer_to_tag_dict(biasData, biasDims, biasDimsLength, 32, 32);
+    resultDict = add_tag_to_dict(resultDict, "bias", biasTag);
+    free(biasTag);
+  }
+
+  resultDict = add_uint_to_dict(resultDict, "padding", layer->net.convolutional.border);
+
+  return resultDict;
+}
+
+SBinaryTag* fcnode_to_tag(ccv_convnet_layer_t* layer) {
+  SBinaryTag* resultDict = create_dict_tag();
+  resultDict = add_string_to_dict(resultDict, "class", "neuron");
+  resultDict = add_string_to_dict(resultDict, "name", "nameless libccv neuron layer");
+
+  SBinaryTag* specDict = create_dict_tag();
+  specDict = add_uint_to_dict(specDict, "num_output", layer->net.full_connect.count);
+  resultDict = add_tag_to_dict(resultDict, "spec", specDict);
+  free(specDict);
+
+  const bool wantTransposedOutput = true;
+  const bool areWeightsTransposed = true;
+  const int outputBitDepth = 8;
+  const bool useBias = true;
+  const float dropout = 0.0f;
+
+  float* weightsData = layer->w;
+  const int weightsElementCount = layer->wnum;
+  int weightsDims[2] = {
+    layer->net.full_connect.count,
+    layer->input.node.count,
+  };
+  int weightsDimsLength = 2;
+  assert(element_count_from_dims(weightsDims, weightsDimsLength) == weightsElementCount);
+
+  if (wantTransposedOutput != areWeightsTransposed) {
+    transpose_buffer(weightsData, weightsDims, weightsDimsLength);
+  }
+
+  SBinaryTag* weightsTag = buffer_to_tag_dict(weightsData, weightsDims, weightsDimsLength, 32, outputBitDepth);
+  resultDict = add_tag_to_dict(resultDict, "weight", weightsTag);
+  free(weightsTag);
+  if (wantTransposedOutput != areWeightsTransposed) {
+    transpose_buffer(weightsData, weightsDims, weightsDimsLength);
+  }
+
+  if (wantTransposedOutput) {
+    resultDict = add_uint_to_dict(resultDict, "are_weights_transposed", 1);
+  } else {
+    resultDict = add_uint_to_dict(resultDict, "are_weights_transposed", 0);
+  }
+
+  resultDict = add_uint_to_dict(resultDict, "has_bias", useBias);
+  if (useBias) {
+    float* biasData = layer->bias;
+    int biasDims[1] = { layer->net.full_connect.count };
+    int biasDimsLength = 1;
+    SBinaryTag* biasTag = buffer_to_tag_dict(biasData, biasDims, biasDimsLength, 32, 32);
+    resultDict = add_tag_to_dict(resultDict, "bias", biasTag);
+    free(biasTag);
+  }
+
+  resultDict = add_float_to_dict(resultDict, "dropout", dropout);
+
+  return resultDict;
+}
+
+SBinaryTag* relunode_to_tag(ccv_convnet_layer_t* layer) {
+  SBinaryTag* resultDict = create_dict_tag();
+  resultDict = add_string_to_dict(resultDict, "class", "relu");
+  resultDict = add_string_to_dict(resultDict, "name", "nameless libccv relu layer");
+  return resultDict;
+}
+
+SBinaryTag* poolnode_to_tag(ccv_convnet_layer_t* layer) {
+  SBinaryTag* resultDict = create_dict_tag();
+  resultDict = add_string_to_dict(resultDict, "class", "pool");
+  resultDict = add_string_to_dict(resultDict, "name", "nameless libccv pool layer");
+
+  resultDict = add_uint_to_dict(resultDict, "psize", layer->net.pool.size);
+  resultDict = add_uint_to_dict(resultDict, "stride", layer->net.pool.strides);
+  if (layer->type == CCV_CONVNET_MAX_POOL) {
+    resultDict = add_string_to_dict(resultDict, "mode", "max");
+  } else if (layer->type == CCV_CONVNET_AVERAGE_POOL) {
+    resultDict = add_string_to_dict(resultDict, "mode", "average");
+  } else {
+    fprintf(stderr, "Unknown pooling mode '%d'\n", layer->type);
+  }
+  return resultDict;
+}
+
+SBinaryTag* normnode_to_tag(ccv_convnet_layer_t* layer) {
+  SBinaryTag* resultDict = create_dict_tag();
+  resultDict = add_string_to_dict(resultDict, "class", "normalize");
+  resultDict = add_string_to_dict(resultDict, "name", "nameless libccv normalize layer");
+
+  resultDict = add_uint_to_dict(resultDict, "size", layer->net.rnorm.size);
+  resultDict = add_float_to_dict(resultDict, "k", layer->net.rnorm.kappa);
+  resultDict = add_float_to_dict(resultDict, "alpha", (layer->net.rnorm.alpha * layer->net.rnorm.size));
+  resultDict = add_float_to_dict(resultDict, "beta", layer->net.rnorm.beta);
+
+  return resultDict;
+}
+
+SBinaryTag* softmaxnode_to_tag(ccv_convnet_layer_t* layer) {
+  SBinaryTag* resultDict = create_dict_tag();
+  resultDict = add_string_to_dict(resultDict, "class", "max");
+  resultDict = add_string_to_dict(resultDict, "name", "nameless libccv softmax layer");
+  return resultDict;
+}
+
 void ccv_convnet_input_formation(ccv_convnet_t* convnet, ccv_dense_matrix_t* a, ccv_dense_matrix_t** b)
 {
 	if (a->rows > convnet->input.height && a->cols > convnet->input.width)
@@ -1562,6 +1921,42 @@ void ccv_convnet_free(ccv_convnet_t* convnet)
 	if (convnet->mean_activity)
 		ccv_matrix_free(convnet->mean_activity);
 	ccfree(convnet);
+}
+
+void ccv_convnet_print(ccv_convnet_t* convnet, const char* filename, ccv_convnet_write_param_t params) {
+
+  fprintf(stderr, "CCV convnet - %d layers, inputWidth = %d, inputHeight = %d, channels = %d\n", convnet->count, convnet->input.width, convnet->input.height, convnet->channels);
+  fprintf(stderr, "  mean: %d elements\n", (convnet->input.height * convnet->input.width * convnet->channels));
+
+  int i;
+  for (i = 0; i < convnet->count; i++)
+  {
+    ccv_convnet_layer_t* layer = convnet->layers + i;
+    fprintf(stderr, "Layer:\n");
+    fprintf(stderr, "  type=%d, input.matrix.rows=%d, input.matrix.cols=%d, input.matrix.channels = %d, input.matrix.partition = %d, input.node.count = %d\n",
+      layer->type, layer->input.matrix.rows, layer->input.matrix.cols, layer->input.matrix.channels, layer->input.matrix.partition, layer->input.node.count);
+    switch (layer->type)
+    {
+      case CCV_CONVNET_CONVOLUTIONAL:
+        fprintf(stderr, "  conv: rows = %d, cols = %d, channels = %d, partition = %d, count = %d, strides = %d, border = %d\n",
+          layer->net.convolutional.rows, layer->net.convolutional.cols, layer->net.convolutional.channels, layer->net.convolutional.partition,
+          layer->net.convolutional.count, layer->net.convolutional.strides, layer->net.convolutional.border);
+        fprintf(stderr, "        weights = %zd elements, bias = %d elements\n", layer->wnum, layer->net.convolutional.count);
+        break;
+      case CCV_CONVNET_FULL_CONNECT:
+        fprintf(stderr, "  fc: count = %d, relu = %d\n", layer->net.full_connect.count, layer->net.full_connect.relu);
+        fprintf(stderr, "      weights = %zd elements, bias = %d elements\n", layer->wnum, layer->net.full_connect.count);
+        break;
+      case CCV_CONVNET_MAX_POOL:
+      case CCV_CONVNET_AVERAGE_POOL:
+        fprintf(stderr, "  pool: strides = %d, border = %d, size = %d\n", layer->net.pool.strides, layer->net.pool.border, layer->net.pool.size);
+        break;
+      case CCV_CONVNET_LOCAL_RESPONSE_NORM:
+        fprintf(stderr, "  norm: size = %d, kappa = %f, alpha = %f, beta = %f\n",
+          layer->net.rnorm.size, layer->net.rnorm.kappa, layer->net.rnorm.alpha, layer->net.rnorm.beta);
+        break;
+    }
+  }
 }
 
 #endif

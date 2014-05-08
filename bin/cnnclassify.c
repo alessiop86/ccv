@@ -11,7 +11,7 @@ unsigned int get_current_time()
 
 int main(int argc, char** argv)
 {
-	assert(argc >= 3);
+	assert(argc >= 5);
 	ccv_enable_default_cache();
 	ccv_dense_matrix_t* image = 0;
 	ccv_read(argv[1], &image, CCV_IO_ANY_FILE | CCV_IO_RGB_COLOR);
@@ -23,7 +23,7 @@ int main(int argc, char** argv)
 		ccv_matrix_free(image);
 		unsigned int elapsed_time = get_current_time();
 		ccv_array_t* rank = 0;
-		ccv_convnet_classify(convnet, &input, 1, &rank, 5, 1);
+		ccv_convnet_classify(convnet, &input, 0, &rank, 5, 1);
 		elapsed_time = get_current_time() - elapsed_time;
 		int i;
 		for (i = 0; i < rank->rnum - 1; i++)
@@ -36,6 +36,9 @@ int main(int argc, char** argv)
 		printf("elapsed time %dms\n", elapsed_time);
 		ccv_array_free(rank);
 		ccv_matrix_free(input);
+    ccv_convnet_write_param_t write_params;
+    write_params.half_precision = 1;
+    ccv_convnet_write_binary(convnet, argv[3], argv[4], write_params);
 		ccv_convnet_free(convnet);
 	} else {
 		FILE* r = fopen(argv[1], "rt");
