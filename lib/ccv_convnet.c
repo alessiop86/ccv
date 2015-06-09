@@ -14,6 +14,7 @@
 #include "inl/ccv_convnet_inl.h"
 #include "binary_format.h"
 #include "buffer.h"
+#include <stdbool.h>
 
 static SBinaryTag* convnode_to_tag(ccv_convnet_layer_t* layer);
 static SBinaryTag* single_convnode_to_tag(ccv_convnet_layer_t* layer, int currentPartition, int partitionCount);
@@ -29,7 +30,7 @@ static SBinaryTag* softmaxnode_to_tag(ccv_convnet_layer_t* layer);
 #define SAVE_RESULTS
 #if defined(SAVE_RESULTS)
 #define FN_LEN (1024)
-#define DUMP_FILE_PATH ("/Users/petewarden/projects/jpcnn/data/libccv_blobs/")
+#define DUMP_FILE_PATH ("/home/alessiop/ccvs/warden/libccv_blobs/") //put your path here
 #endif // SAVE_RESULTS
 
 #ifndef CASE_TESTS
@@ -671,9 +672,8 @@ void ccv_convnet_classify(ccv_convnet_t* convnet, ccv_dense_matrix_t** a, int sy
 				_ccv_convnet_layer_derive_output(layer, rows, cols, &out_rows, &out_cols, &out_partition);
 #ifdef SAVE_RESULTS
         char input_filename[FN_LEN];
-        snprintf(input_filename, FN_LEN,
-          "%s%03d_input.blob",
-          DUMP_FILE_PATH, j);
+		
+        //snprintf(input_filename, FN_LEN, "%s%03d_input.blob", DUMP_FILE_PATH, j); //dump blob data to fs, disabled
         ccv_dense_matrix_t* buffer = b[j];
         float* buffer_data = buffer->data.f32;
         int buffer_dims[4] = {
@@ -693,7 +693,11 @@ void ccv_convnet_classify(ccv_convnet_t* convnet, ccv_dense_matrix_t** a, int sy
 			}
       fprintf(stderr, "cols = %d, layer.cols = %d, rows = %d, layer.rows = %d\n",
         cols, convnet->layers[scan + 1].input.matrix.cols, rows, convnet->layers[scan + 1].input.matrix.rows);
-			int offsets[sampleCount][2] = {
+			//int offsets[sampleCount][2];
+//			int offsets[sampleCount][2];
+//			memset (offsets, 0, sampleCount*2*sizeof(int) );
+//			offsets = {
+			int offsets[1][2] = {
 //				{0, 0},
 //				{cols - convnet->layers[scan + 1].input.matrix.cols, 0},
 				{(cols - convnet->layers[scan + 1].input.matrix.cols) / 2, (rows - convnet->layers[scan + 1].input.matrix.rows) / 2},
@@ -712,9 +716,7 @@ void ccv_convnet_classify(ccv_convnet_t* convnet, ccv_dense_matrix_t** a, int sy
 					layer = convnet->layers + j;
 #ifdef SAVE_RESULTS
           char input_filename[FN_LEN];
-          snprintf(input_filename, FN_LEN,
-            "%s%03d_input.blob",
-            DUMP_FILE_PATH, j);
+          //snprintf(input_filename, FN_LEN,"%s%03d_input.blob", DUMP_FILE_PATH, j); //dump blob data to fs, disabled
           ccv_dense_matrix_t* buffer = j > scan + 1 ? b[j] : input;
           float* buffer_data = buffer->data.f32;
           int buffer_dims[4] = {
@@ -749,9 +751,7 @@ void ccv_convnet_classify(ccv_convnet_t* convnet, ccv_dense_matrix_t** a, int sy
 			assert(layer->type == CCV_CONVNET_FULL_CONNECT);
 #ifdef SAVE_RESULTS
       char input_filename[FN_LEN];
-      snprintf(input_filename, FN_LEN,
-        "%s%03d_input.blob",
-        DUMP_FILE_PATH, j);
+      //snprintf(input_filename, FN_LEN, "%s%03d_input.blob",  DUMP_FILE_PATH, j); //dump blob data to fs, disabled
       ccv_dense_matrix_t* buffer = b[j];
       float* buffer_data = buffer->data.f32;
       int buffer_dims[4] = {
